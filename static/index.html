@@ -1,0 +1,791 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>openhh</title>
+<style>
+  :root {
+    --bg: #1a1a1a; --panel: #1f1f1f; --field: #141414; --border: #3d3d3d;
+    --text: #e6e6e6; --dim: #8f8f8f; --red: #a3524a; --link: #58a6dc;
+    --arch: #6fada7; --dev: #7396bd; --qa: #a58bc9;
+    --ok: #85a883; --bad: #c25b50; --warn: #c19a58; --todo: #8f8f8f;
+  }
+  * { box-sizing: border-box; scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border: 2px solid var(--bg); }
+  ::-webkit-scrollbar-thumb:hover { background: var(--dim); }
+  ::-webkit-scrollbar-corner { background: transparent; }
+  :root { color-scheme: dark; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, "DejaVu Sans Mono", monospace;
+  }
+  pre, code, .mono { font-family: inherit; }
+
+  header {
+    display: flex; gap: 1.1rem; align-items: center; padding: .8rem 1.4rem;
+    position: sticky; top: 0; z-index: 10; background: var(--bg);
+  }
+  h1 { font-size: 1.25rem; margin: 0; font-weight: 700; letter-spacing: .01em; }
+  h1 span { color: var(--dim); font-weight: 400; font-size: .85rem; }
+  .pill {
+    display: inline-flex; align-items: center; gap: .5rem;
+    font-size: .8rem; color: var(--dim);
+  }
+  .pill .dot { width: 8px; height: 8px; background: var(--dim); }
+  .pill.running { color: var(--text); }
+  .pill.running .dot { background: var(--red); animation: pulse 1.4s steps(2) infinite; }
+  .navlink {
+    margin-left: auto; color: var(--link); font-size: .85rem; text-decoration: none;
+    background: transparent; font-family: inherit; cursor: pointer; border: 0; padding: .3rem .2rem;
+  }
+  .navlink:hover { text-decoration: underline; }
+  #newtask {
+    background: var(--red); color: #f2e6e4; border: 1px solid var(--red);
+    padding: .35rem 1rem; font: inherit; font-size: .85rem; font-weight: 700; cursor: pointer;
+  }
+  #newtask:hover { filter: brightness(1.12); }
+
+  main { max-width: 1560px; margin: 0 auto; padding: 1.3rem 1.4rem 2rem; }
+
+  /* ---- board: bordered panels with the title on the border line ---- */
+  .board { display: grid; grid-template-columns: repeat(5, minmax(210px, 1fr)); gap: 1.1rem; align-items: start; }
+  @media (max-width: 1250px) { .board { grid-template-columns: repeat(3, minmax(210px, 1fr)); } }
+  @media (max-width: 860px) { .board { grid-template-columns: repeat(2, minmax(210px, 1fr)); } }
+  @media (max-width: 560px) { .board { grid-template-columns: 1fr; } }
+  .col {
+    border: 1px solid var(--border); background: transparent;
+    padding: 1.2rem .75rem .75rem; min-height: 12rem; min-width: 0;
+    position: relative; margin-top: .55rem;
+  }
+  .col-head {
+    position: absolute; top: -0.8em; left: .55rem; background: var(--bg);
+    padding: 0 .5rem; display: flex; align-items: center; gap: .55rem;
+    font-size: .8rem; font-weight: 700; letter-spacing: .04em; white-space: nowrap;
+  }
+  .col-head .cdot { width: 8px; height: 8px; }
+  .col-head .ccount { color: var(--dim); font-weight: 400; }
+  .col.todo .col-head { color: var(--todo); } .col.todo .cdot { background: var(--todo); }
+  .col.arch .col-head { color: var(--arch); } .col.arch .cdot { background: var(--arch); }
+  .col.dev  .col-head { color: var(--dev); }  .col.dev  .cdot { background: var(--dev); }
+  .col.qa   .col-head { color: var(--qa); }   .col.qa   .cdot { background: var(--qa); }
+  .col.done .col-head { color: var(--ok); }   .col.done .cdot { background: var(--ok); }
+  .col-body { display: grid; gap: .65rem; min-width: 0; }
+  .col .empty { color: var(--dim); font-size: .78rem; text-align: center; padding: 1.6rem .5rem; }
+
+  /* ---- task cards ---- */
+  .tcard {
+    --accent: var(--todo);
+    background: var(--panel); border: 1px solid var(--border);
+    border-left: 2px solid var(--accent);
+    padding: .6rem .75rem; cursor: pointer; position: relative;
+    min-width: 0; max-width: 100%; overflow: hidden;
+  }
+  .tcard:hover { border-color: color-mix(in srgb, var(--accent) 60%, var(--border)); }
+  .tcard.arch { --accent: var(--arch); }
+  .tcard.dev { --accent: var(--dev); }
+  .tcard.qa { --accent: var(--qa); }
+  .tcard.done { --accent: var(--ok); }
+  .tcard.failed { --accent: var(--bad); }
+  .tcard.active::after {
+    content: "▊"; position: absolute; top: .45rem; right: .55rem;
+    color: var(--accent); animation: pulse 1.1s steps(2) infinite;
+  }
+  .t-top { display: flex; gap: .5rem; align-items: baseline; min-width: 0; }
+  .t-id { color: var(--dim); font-size: .75rem; flex: 0 0 auto; }
+  .t-title { font-weight: 700; font-size: .85rem; min-width: 0; flex: 1;
+             overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tcard.active .t-title { padding-right: 1rem; }
+  .t-sub { color: var(--dim); font-size: .75rem; margin-top: .1rem;
+           overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .t-meta { display: flex; gap: .35rem; flex-wrap: wrap; margin-top: .5rem; }
+  .chip {
+    font-size: .72rem; color: var(--dim); border: 1px solid var(--border);
+    padding: .02rem .4rem; background: transparent; white-space: nowrap;
+  }
+  .chip.rework { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, var(--border)); }
+  .chip.verdict-ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, var(--border)); font-weight: 700; }
+  .chip.verdict-bad { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, var(--border)); font-weight: 700; }
+  .t-last {
+    margin-top: .45rem; color: var(--dim); font-size: .75rem;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+
+  /* ---- modals ---- */
+  .overlay {
+    position: fixed; inset: 0; z-index: 50; display: grid; place-items: center;
+    background: rgba(0, 0, 0, .72); padding: 1.2rem;
+  }
+  .overlay[hidden] { display: none; }
+  .modal {
+    background: var(--bg); border: 1px solid var(--border);
+    width: min(1100px, 100%); max-height: 92vh; display: flex; flex-direction: column; overflow: hidden;
+  }
+  .modal-head {
+    display: flex; align-items: center; gap: .8rem; padding: .7rem 1rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .modal-head .name { font-weight: 700; }
+  .modal-head .sub { color: var(--dim); font-size: .78rem; }
+  .close {
+    margin-left: auto; background: transparent; border: 1px solid var(--border); color: var(--dim);
+    width: 26px; height: 26px; cursor: pointer; font: inherit; line-height: 1;
+  }
+  .close:hover { color: var(--text); border-color: var(--dim); }
+  .status-chip { font-size: .75rem; font-weight: 700; padding: .1rem .5rem; border: 1px solid; }
+  .status-chip.todo { color: var(--todo); }
+  .status-chip.arch { color: var(--arch); }
+  .status-chip.dev { color: var(--dev); }
+  .status-chip.qa { color: var(--qa); }
+  .status-chip.done { color: var(--ok); }
+  .status-chip.failed { color: var(--bad); }
+
+  .reopenbar { display: flex; gap: .5rem; padding: .55rem 1rem; border-bottom: 1px solid var(--border); }
+  .reopenbar input { flex: 1; min-width: 0; }
+  .reopenbar button {
+    flex: 0 0 auto; background: var(--red); color: #f2e6e4; border: 1px solid var(--red);
+    padding: .3rem .9rem; font: inherit; font-size: .8rem; font-weight: 700; cursor: pointer; white-space: nowrap;
+  }
+  .reopenbar button:hover { filter: brightness(1.12); }
+
+  .modal-body { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 0; min-height: 0; }
+  @media (max-width: 860px) { .modal-body { grid-template-columns: 1fr; } }
+  .logwrap { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--border); }
+  .tabs { display: flex; gap: .45rem; padding: .55rem .8rem; border-bottom: 1px solid var(--border); align-items: center; }
+  .tab {
+    background: transparent; color: var(--dim); border: 1px solid var(--border);
+    padding: .25rem .75rem; font: inherit; font-size: .78rem; cursor: pointer;
+  }
+  .tab.on.architect { color: var(--arch); border-color: var(--arch); font-weight: 700; }
+  .tab.on.developer { color: var(--dev); border-color: var(--dev); font-weight: 700; }
+  .tab.on.qa { color: var(--qa); border-color: var(--qa); font-weight: 700; }
+  .tabs label { margin-left: auto; display: flex; align-items: center; gap: .35rem; color: var(--dim); font-size: .78rem; }
+  #mlog { overflow-y: auto; padding: .8rem; display: grid; gap: .55rem; height: 62vh; scroll-behavior: smooth; }
+  .empty { color: var(--dim); text-align: center; padding: 2.5rem 1rem; font-size: .82rem; }
+  .ev {
+    --accent: var(--dim);
+    background: var(--panel); border: 1px solid var(--border); border-left: 2px solid var(--accent);
+    padding: .5rem .7rem; min-width: 0;
+  }
+  .ev.architect { --accent: var(--arch); }
+  .ev.developer { --accent: var(--dev); }
+  .ev.qa { --accent: var(--qa); }
+  .ev.error, .ev.retry { --accent: var(--bad); }
+  .ev.report { --accent: var(--ok); }
+  .ev.report.back { --accent: var(--warn); }
+  .ev.round { background: transparent; border: 0; color: var(--dim); text-align: center; padding: .5rem 0 .1rem; font-size: .78rem; }
+  .meta { display: flex; gap: .6rem; font-size: .75rem; color: var(--dim); align-items: baseline; }
+  .badge { text-transform: uppercase; font-weight: 700; color: var(--accent); letter-spacing: .04em; }
+  .ev pre { margin: .35rem 0 0; white-space: pre-wrap; word-break: break-word; max-height: 13rem; overflow: auto; font-size: .78rem; }
+  .thought { color: var(--dim); font-style: italic; }
+
+  /* ---- plan sidebar in modal ---- */
+  #mplan { padding: .9rem 1rem; overflow-y: auto; max-height: 66vh; display: grid; gap: 1.1rem; align-content: start; }
+  .tgroup-head {
+    display: flex; align-items: baseline; gap: .5rem; margin-bottom: .5rem;
+    border-bottom: 1px dotted var(--border); padding-bottom: .3rem;
+  }
+  .tgroup-head .who { font-size: .75rem; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
+  .tgroup.arch .who { color: var(--arch); }
+  .tgroup.dev .who { color: var(--dev); } .tgroup.qa .who { color: var(--qa); }
+  .tgroup-head .frac { margin-left: auto; color: var(--dim); font-size: .75rem; }
+  .bar { height: 7px; background: var(--field); border: 1px solid var(--border); overflow: hidden; margin-bottom: .6rem; }
+  .bar i { display: block; height: 100%; background: var(--red); transition: width .35s ease; }
+  .task { display: flex; gap: .55rem; padding: .3rem 0; align-items: flex-start; }
+  .task .ico { flex: 0 0 auto; width: 16px; height: 16px; margin-top: .15rem;
+               border: 1px solid var(--dim); display: grid; place-items: center; font-size: .62rem; }
+  .task.done .ico { border-color: var(--ok); color: var(--ok); }
+  .task.in_progress .ico { border-color: var(--warn); color: var(--warn); }
+  .task.in_progress .ico::after { content: "▪"; color: var(--warn); animation: pulse 1.2s steps(2) infinite; }
+  .task .t-name { font-size: .8rem; }
+  .task.done .t-name { color: var(--dim); text-decoration: line-through; }
+  .task.in_progress .t-name { font-weight: 700; }
+  .task .t-notes { color: var(--dim); font-size: .75rem; margin-top: .1rem; }
+
+  /* ---- create form ---- */
+  #createform { padding: 1rem 1.1rem; display: grid; gap: .7rem; overflow-y: auto; }
+  #createform .row { display: flex; gap: .7rem; flex-wrap: wrap; }
+  #createform .row label { flex: 1; min-width: 12rem; }
+  label { color: var(--dim); font-size: .78rem; display: grid; gap: .25rem; }
+  input, textarea, select {
+    background: var(--field); color: var(--text); width: 100%;
+    border: 1px solid var(--border); padding: .45rem .6rem; font: inherit; border-radius: 0;
+  }
+  input:focus, textarea:focus, select:focus { outline: none; border-color: var(--dim); }
+  textarea { min-height: 6.5rem; resize: vertical; }
+  .check { display: flex; gap: .5rem; align-items: center; }
+  .check input { width: auto; accent-color: var(--red); }
+  .toggle { cursor: pointer; color: var(--text); gap: .6rem; }
+  .toggle input { position: absolute; opacity: 0; pointer-events: none; }
+  .toggle .track {
+    flex: 0 0 auto; width: 38px; height: 18px;
+    background: var(--field); border: 1px solid var(--border); position: relative; transition: background .18s ease;
+  }
+  .toggle .knob {
+    position: absolute; top: 2px; left: 2px; width: 12px; height: 12px;
+    background: var(--dim); transition: transform .18s ease, background .18s ease;
+  }
+  .toggle input:checked + .track { background: var(--red); border-color: var(--red); }
+  .toggle input:checked + .track .knob { transform: translateX(20px); background: #f2e6e4; }
+  .toggle input:focus-visible + .track { outline: 1px solid var(--dim); outline-offset: 2px; }
+  .toggle .hint { color: var(--dim); }
+  .withbtn { display: flex; gap: .4rem; }
+  .withbtn select { flex: 1; min-width: 0; }
+  .iconbtn {
+    flex: 0 0 auto; width: 2.3rem; background: var(--field); color: var(--dim);
+    border: 1px solid var(--border); font: inherit; font-size: 1rem; cursor: pointer;
+  }
+  .iconbtn:hover { color: var(--text); border-color: var(--dim); }
+  .stagechecks { display: flex; gap: 1.2rem; flex-wrap: wrap; padding: .2rem 0; }
+  .stagechecks .check { color: var(--text); font-size: .82rem; cursor: pointer; }
+
+  /* ---- LLM profiles modal ---- */
+  .llm-body { display: grid; grid-template-columns: minmax(0, 1fr) 320px; min-height: 0; }
+  @media (max-width: 760px) { .llm-body { grid-template-columns: 1fr; } }
+  .plist { padding: .8rem; display: grid; gap: .65rem; align-content: start;
+           overflow-y: auto; max-height: 70vh; border-right: 1px solid var(--border); }
+  #pform { padding: 1rem 1.1rem; display: grid; gap: .7rem; align-content: start; }
+  .pcard {
+    background: var(--panel); border: 1px solid var(--border); border-left: 2px solid var(--red);
+    padding: .6rem .75rem; min-width: 0;
+  }
+  .p-top { display: flex; gap: .6rem; align-items: baseline; min-width: 0; }
+  .p-name { font-weight: 700; }
+  .p-model { color: var(--dim); font-size: .78rem; min-width: 0;
+             overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .p-meta { display: flex; gap: .35rem; flex-wrap: wrap; margin-top: .45rem; align-items: center; }
+  .p-meta .chip { max-width: 100%; }
+  .chip.key-ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, var(--border)); }
+  .p-actions { margin-left: auto; display: flex; gap: .4rem; }
+  .btn {
+    background: transparent; color: var(--dim); border: 1px solid var(--border);
+    padding: .12rem .55rem; font: inherit; font-size: .75rem; cursor: pointer;
+  }
+  .btn:hover { color: var(--text); border-color: var(--dim); }
+  .btn.danger:hover { color: var(--bad); border-color: var(--bad); }
+  #msg { font-size: .78rem; min-height: 1.2rem; }
+  #msg.ok { color: var(--ok); } #msg.bad { color: var(--bad); }
+  #create, #save {
+    background: var(--red); color: #f2e6e4; border: 1px solid var(--red);
+    padding: .45rem 1.2rem; font: inherit; font-weight: 700;
+    cursor: pointer; justify-self: start;
+  }
+  #create:hover, #save:hover { filter: brightness(1.12); }
+  #create:disabled { background: var(--border); border-color: var(--border); cursor: default; }
+
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .2; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>openhh <span>agent board</span></h1>
+  <span class="pill" id="statuspill"><span class="dot"></span><span id="statustext">no tasks</span></span>
+  <button class="navlink" id="llmbtn">LLM profiles</button>
+  <button id="newtask">+ New task</button>
+</header>
+
+<main>
+  <div class="board" id="board"></div>
+</main>
+
+<!-- task detail modal -->
+<div class="overlay" id="detail" hidden>
+  <div class="modal">
+    <div class="modal-head">
+      <span class="name" id="d-title"></span>
+      <span class="status-chip" id="d-status"></span>
+      <span class="sub" id="d-sub"></span>
+      <button class="close" data-close="detail">✕</button>
+    </div>
+    <form class="reopenbar" id="reopenbar" hidden>
+      <input id="reopen_comment" autocomplete="off"
+             placeholder="What is wrong or missing? Sent to the agents as rework notes.">
+      <button type="submit">↻ Reopen</button>
+    </form>
+    <div class="modal-body">
+      <section class="logwrap">
+        <div class="tabs">
+          <button class="tab architect" data-tab="architect">Architect</button>
+          <button class="tab developer" data-tab="developer">Developer</button>
+          <button class="tab qa" data-tab="qa">QA</button>
+          <label><input type="checkbox" id="follow" checked> follow</label>
+        </div>
+        <div id="mlog"></div>
+      </section>
+      <aside id="mplan"></aside>
+    </div>
+  </div>
+</div>
+
+<!-- create task modal -->
+<div class="overlay" id="creator" hidden>
+  <div class="modal" style="width:min(760px,100%)">
+    <div class="modal-head">
+      <span class="name">New task</span>
+      <button class="close" data-close="creator">✕</button>
+    </div>
+    <form id="createform">
+      <div class="row">
+        <label>title
+          <input id="title" placeholder="Build temperature converter">
+        </label>
+        <label>LLM profile
+          <span class="withbtn">
+            <select id="llm_profile"></select>
+            <button type="button" class="iconbtn" id="managelink" title="Manage LLM profiles">⛭</button>
+          </span>
+        </label>
+        <label style="max-width:8rem">max steps
+          <input id="max_steps" type="number" value="12" min="1">
+        </label>
+      </div>
+      <label>pipeline stages <span class="hint" style="font-size:.72rem">(agents hand tasks to each other; the last enabled stage closes the task)</span>
+        <div class="stagechecks">
+          <label class="check"><input type="checkbox" id="st_architect"> Architect</label>
+          <label class="check"><input type="checkbox" id="st_developer" checked> Developer</label>
+          <label class="check"><input type="checkbox" id="st_qa" checked> QA</label>
+        </div>
+      </label>
+      <div class="row">
+        <label>workspace directory
+          <input id="workspace" required list="wsdirs" autocomplete="off"
+                 placeholder="demo-temps, or ~/work for all repos">
+          <datalist id="wsdirs"></datalist>
+        </label>
+        <label>spec file path
+          <input id="spec_path" placeholder="specs/example-temps.md">
+        </label>
+      </div>
+      <label>…or paste spec text (overrides spec file)
+        <textarea id="spec_text" placeholder="# Spec ..."></textarea>
+      </label>
+      <label class="check toggle">
+        <input type="checkbox" id="docker" checked>
+        <span class="track"><span class="knob"></span></span>
+        <span>run each agent in its own Docker container
+          <span class="hint">(needs Docker; first run pulls the image)</span></span>
+      </label>
+      <button id="create">Create task</button>
+    </form>
+  </div>
+</div>
+
+<!-- LLM profiles modal -->
+<div class="overlay" id="llmmgr" hidden>
+  <div class="modal" style="width:min(900px,100%)">
+    <div class="modal-head">
+      <span class="name">LLM profiles</span>
+      <button class="close" data-close="llmmgr">✕</button>
+    </div>
+    <div class="llm-body">
+      <div class="plist" id="plist"><div class="empty">loading…</div></div>
+      <form id="pform">
+        <span class="sub" id="form-head">Add profile</span>
+        <label>name
+          <input id="p_name" required placeholder="fast-local">
+        </label>
+        <label>model
+          <input id="p_model" required placeholder="openai/muse-glimmer">
+        </label>
+        <label>base URL
+          <input id="p_base_url" required placeholder="http://host:8000/v1">
+        </label>
+        <label>API key
+          <input id="p_api_key" type="password" placeholder="empty = keep current / none" autocomplete="off">
+        </label>
+        <label style="max-width:9rem">temperature
+          <input id="p_temperature" type="number" step="0.05" min="0" max="2" value="0.3">
+        </label>
+        <span class="hint" style="color:var(--dim);font-size:.72rem">
+          Saving an existing name updates it; a new name adds a profile.
+          Tasks capture their profile at creation, so edits never affect running tasks.</span>
+        <button id="save">Save profile</button>
+        <span id="msg"></span>
+      </form>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => (s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const ROLES = ['architect', 'developer', 'qa'];
+const ROLE_NAMES = {architect: 'Architect', developer: 'Developer', qa: 'QA'};
+const ROLE_STATUS = {architect: 'arch', developer: 'dev', qa: 'qa'};
+const COLS = [
+  {key: 'todo', name: 'To Do'},
+  {key: 'arch', name: 'Architect'},
+  {key: 'dev', name: 'In Dev'},
+  {key: 'qa', name: 'In QA'},
+  {key: 'done', name: 'Done'},
+];
+const RUNNING = ['arch', 'dev', 'qa'];
+
+const tasks = new Map();           // task_id -> task state
+let selected = null;               // task_id open in the detail modal
+let selectedRole = 'developer';    // whose log tab is open
+
+function getTask(id) {
+  if (!tasks.has(id)) {
+    tasks.set(id, {
+      id, title: `#${id}`, workspace: '', llm: '', model: '', max: '?',
+      stages: ['developer', 'qa'],
+      status: 'todo', note: 'queued', active: null,
+      step: 0, reworks: 0, reopens: 0,
+      actions: {architect: 0, developer: 0, qa: 0}, last: '—',
+      logs: {architect: [], developer: [], qa: []},
+      plan: {architect: [], developer: [], qa: []},
+    });
+  }
+  return tasks.get(id);
+}
+
+const colFor = t => t.status === 'failed' ? 'done' : t.status;
+
+/* ---- header status ---- */
+function renderStatus() {
+  const all = [...tasks.values()];
+  const running = all.filter(t => RUNNING.includes(t.status)).length;
+  const queued = all.filter(t => t.status === 'todo').length;
+  const done = all.filter(t => t.status === 'done' || t.status === 'failed').length;
+  const pill = $('#statuspill');
+  pill.className = 'pill' + (running ? ' running' : '');
+  $('#statustext').textContent = all.length
+    ? `${running} running · ${queued} queued · ${done} done`
+    : 'no tasks';
+}
+
+/* ---- board ---- */
+function cardHTML(t) {
+  const chips = [];
+  if (t.llm) chips.push(`<span class="chip">${esc(t.llm)}</span>`);
+  chips.push(`<span class="chip">${t.stages.map(s => ROLE_NAMES[s][0]).join('·')}</span>`);
+  if (t.step) chips.push(`<span class="chip">step ${t.step}/${t.max}</span>`);
+  const acts = ROLES.reduce((n, r) => n + t.actions[r], 0);
+  if (acts) chips.push(`<span class="chip">${acts} actions</span>`);
+  if (t.reworks) chips.push(`<span class="chip rework">↩ ${t.reworks} rework${t.reworks > 1 ? 's' : ''}</span>`);
+  if (t.reopens) chips.push(`<span class="chip rework">↻ ${t.reopens} reopen${t.reopens > 1 ? 's' : ''}</span>`);
+  if (t.status === 'done') chips.push(`<span class="chip verdict-ok">APPROVED</span>`);
+  if (t.status === 'failed') chips.push(`<span class="chip verdict-bad">FAILED</span>`);
+  const active = RUNNING.includes(t.status);
+  const last = t.status === 'todo' ? t.note : `last: ${t.last}`;
+  return `<article class="tcard ${t.status}${active ? ' active' : ''}" data-id="${t.id}">
+    <div class="t-top"><span class="t-id">#${t.id}</span><span class="t-title">${esc(t.title)}</span></div>
+    <div class="t-sub">${esc(t.workspace)}</div>
+    ${chips.length ? `<div class="t-meta">${chips.join('')}</div>` : ''}
+    <div class="t-last">${esc(last)}</div>
+  </article>`;
+}
+
+function renderBoard() {
+  const all = [...tasks.values()];
+  $('#board').innerHTML = COLS.map(col => {
+    const cards = all.filter(t => colFor(t) === col.key);
+    return `<div class="col ${col.key}">
+      <div class="col-head"><span class="cdot"></span>${col.name}
+        <span class="ccount">${cards.length}</span></div>
+      <div class="col-body">${cards.length
+        ? cards.map(cardHTML).join('')
+        : `<div class="empty">${col.key === 'todo' ? 'create a task above' : 'empty'}</div>`}</div>
+    </div>`;
+  }).join('');
+  document.querySelectorAll('.tcard').forEach(card =>
+    card.addEventListener('click', () => openDetail(+card.dataset.id)));
+  renderStatus();
+}
+
+/* ---- detail modal ---- */
+function entryHTML(e) {
+  if (e.type === 'stage') return `<div class="ev round">— step ${e.step}/${e.max} · ${esc(e.role)} —</div>`;
+  if (e.type === 'handoff')
+    return `<div class="ev report${e.backward ? ' back' : ''}">
+      <div class="meta"><span class="badge">handoff</span>
+      <span>${esc(e.from)} → ${e.to === 'done' ? 'DONE ✓' : esc(e.to)}${e.backward ? ' ↩' : ''}</span></div>
+      ${e.report ? `<pre>${esc(e.report)}</pre>` : ''}</div>`;
+  const cls = e.type === 'error' || e.type === 'retry' ? ` ${e.type}` : '';
+  const thought = e.thought ? `<pre class="thought">${esc(e.thought)}</pre>` : '';
+  return `<div class="ev ${esc(e.role)}${cls}">
+    <div class="meta"><span class="badge">${esc(e.role)}</span><span>${esc(e.title)}</span></div>
+    ${thought}${e.text ? `<pre>${esc(e.text)}</pre>` : ''}</div>`;
+}
+
+function renderDetailHead(t) {
+  $('#d-title').textContent = `#${t.id} ${t.title}`;
+  const labels = {todo: 'TO DO', arch: 'ARCHITECT', dev: 'IN DEV', qa: 'IN QA', done: 'DONE', failed: 'FAILED'};
+  const chip = $('#d-status');
+  chip.className = `status-chip ${t.status}`;
+  chip.textContent = labels[t.status];
+  $('#d-sub').textContent = [t.workspace, t.llm, t.model].filter(Boolean).join(' · ');
+  $('#reopenbar').hidden = !(t.status === 'done' || t.status === 'failed');
+  document.querySelectorAll('.tab').forEach(b =>
+    b.style.display = t.stages.includes(b.dataset.tab) ? '' : 'none');
+}
+
+function renderLog(t) {
+  const entries = t.logs[selectedRole];
+  document.querySelectorAll('.tab').forEach(b =>
+    b.classList.toggle('on', b.dataset.tab === selectedRole));
+  $('#mlog').innerHTML = entries.length
+    ? entries.map(entryHTML).join('')
+    : '<div class="empty">No activity from this agent yet.</div>';
+  $('#mlog').scrollTop = $('#mlog').scrollHeight;
+}
+
+function renderPlan(t) {
+  const groups = ROLES.filter(r => t.plan[r].length);
+  $('#mplan').innerHTML = groups.length ? groups.map(role => {
+    const items = t.plan[role];
+    const d = items.filter(x => x.status === 'done').length;
+    return `<div class="tgroup ${ROLE_STATUS[role]}">
+      <div class="tgroup-head"><span class="who">${ROLE_NAMES[role]} plan</span>
+        <span class="frac">${d}/${items.length} done</span></div>
+      <div class="bar"><i style="width:${Math.round(d / items.length * 100)}%"></i></div>
+      ${items.map(x => `<div class="task ${x.status}">
+        <span class="ico">${x.status === 'done' ? '✓' : ''}</span>
+        <div><div class="t-name">${esc(x.title)}</div>
+        ${x.notes ? `<div class="t-notes">${esc(x.notes)}</div>` : ''}</div>
+      </div>`).join('')}
+    </div>`;
+  }).join('') : '<div class="empty">No plan yet — agents publish it as they work.</div>';
+}
+
+function openDetail(id) {
+  selected = id;
+  const t = getTask(id);
+  const activeRole = ROLES.find(r => ROLE_STATUS[r] === t.status);
+  selectedRole = activeRole && t.stages.includes(activeRole) ? activeRole : t.stages[0];
+  renderDetailHead(t); renderLog(t); renderPlan(t);
+  $('#detail').hidden = false;
+}
+
+document.querySelectorAll('.tab').forEach(b => b.addEventListener('click', () => {
+  selectedRole = b.dataset.tab;
+  if (selected != null) renderLog(getTask(selected));
+}));
+
+$('#reopenbar').onsubmit = async ev => {
+  ev.preventDefault();
+  const comment = $('#reopen_comment').value.trim();
+  if (!comment || selected == null) { $('#reopen_comment').focus(); return; }
+  const res = await fetch(`/tasks/${selected}/reopen`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({comment}),
+  });
+  if (!res.ok) { alert((await res.json()).detail || res.statusText); return; }
+  $('#reopen_comment').value = '';
+};
+
+function appendLog(e) {
+  const log = $('#mlog');
+  const empty = log.querySelector('.empty');
+  if (empty) empty.remove();
+  log.insertAdjacentHTML('beforeend', entryHTML(e));
+  if ($('#follow').checked) log.scrollTop = log.scrollHeight;
+}
+
+function pushLog(t, role, e) {
+  t.logs[role].push(e);
+  if (selected === t.id && selectedRole === role && !$('#detail').hidden) appendLog(e);
+}
+
+/* ---- event stream ---- */
+function handle(e) {
+  if (e.task_id == null) return;
+  const t = getTask(e.task_id);
+  switch (e.type) {
+    case 'task_created':
+      Object.assign(t, {title: e.title, workspace: e.workspace, max: e.max_steps,
+                        stages: e.stages || t.stages,
+                        llm: e.llm || '', model: e.model, status: 'todo', note: 'queued'});
+      break;
+    case 'task_status':
+      if (e.status === 'starting') t.note = 'starting agents…';
+      break;
+    case 'task_reopened':
+      Object.assign(t, {status: 'todo', note: 'reopened — queued', step: 0,
+                        active: null, reopens: t.reopens + 1});
+      pushLog(t, t.stages[0], {type: 'observation', role: t.stages[0],
+                               title: 'reopened by user', text: e.comment});
+      break;
+    case 'stage':
+      t.status = ROLE_STATUS[e.role] || 'dev';
+      t.step = e.step;
+      t.active = e.role;
+      pushLog(t, e.role, e);
+      break;
+    case 'plan':
+      t.plan[e.role] = e.tasks;
+      if (selected === t.id) renderPlan(t);
+      break;
+    case 'handoff':
+      if (e.backward) t.reworks++;
+      pushLog(t, e.from, e);
+      break;
+    case 'retry':
+      pushLog(t, e.role, e);
+      break;
+    case 'status':
+      t.note = e.text;
+      pushLog(t, t.stages[0], {type: 'observation', role: t.stages[0], title: 'pipeline', text: e.text});
+      break;
+    case 'done':
+      // a crash can emit a second done; never demote an approved task
+      if (t.status !== 'done') t.status = e.approved ? 'done' : 'failed';
+      t.active = null;
+      break;
+    default: // action / observation / message / error
+      if (!(e.role in t.logs)) { pushLog(t, t.stages[0], e); break; }
+      if (e.type === 'action') t.actions[e.role]++;
+      t.last = e.title;
+      pushLog(t, e.role, e);
+  }
+  renderBoard();
+  if (selected === e.task_id && !$('#detail').hidden) renderDetailHead(t);
+}
+
+new EventSource('/events').onmessage = msg => handle(JSON.parse(msg.data));
+
+/* ---- modal controls ---- */
+document.querySelectorAll('[data-close]').forEach(b =>
+  b.addEventListener('click', () => { $('#' + b.dataset.close).hidden = true; if (b.dataset.close === 'detail') selected = null; }));
+document.querySelectorAll('.overlay').forEach(o =>
+  o.addEventListener('click', ev => { if (ev.target === o) { o.hidden = true; if (o.id === 'detail') selected = null; } }));
+document.addEventListener('keydown', ev => {
+  if (ev.key === 'Escape') {
+    $('#detail').hidden = true; $('#creator').hidden = true; $('#llmmgr').hidden = true;
+    selected = null;
+  }
+});
+$('#newtask').onclick = () => {
+  loadProfiles().catch(() => {});  // pick up edits made on the /llms page
+  $('#creator').hidden = false; $('#title').focus();
+};
+
+async function loadProfiles() {
+  const keep = $('#llm_profile').value;
+  const list = await (await fetch('/api/llms')).json();
+  $('#llm_profile').innerHTML = list.map(p =>
+    `<option value="${esc(p.name)}">${esc(p.name)} — ${esc(p.model)}</option>`).join('');
+  if (list.some(p => p.name === keep)) $('#llm_profile').value = keep;
+}
+loadProfiles().catch(() => {});
+
+/* ---- LLM profiles modal ---- */
+let profiles = [];
+
+function pmsg(text, ok) {
+  const m = $('#msg');
+  m.className = ok ? 'ok' : 'bad';
+  m.textContent = text;
+}
+
+function renderProfiles() {
+  $('#plist').innerHTML = profiles.length ? profiles.map(p => `
+    <div class="pcard">
+      <div class="p-top">
+        <span class="p-name">${esc(p.name)}</span>
+        <span class="p-model mono">${esc(p.model)}</span>
+      </div>
+      <div class="p-meta">
+        <span class="chip mono">${esc(p.base_url)}</span>
+        <span class="chip">temp ${p.temperature}</span>
+        <span class="chip${p.has_key ? ' key-ok' : ''}">${p.has_key ? 'key set' : 'no key'}</span>
+        <span class="p-actions">
+          <button type="button" class="btn" data-edit="${esc(p.name)}">edit</button>
+          <button type="button" class="btn danger" data-del="${esc(p.name)}">delete</button>
+        </span>
+      </div>
+    </div>`).join('') : '<div class="empty">No profiles yet.</div>';
+
+  document.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => {
+    const p = profiles.find(x => x.name === b.dataset.edit);
+    $('#p_name').value = p.name;
+    $('#p_model').value = p.model;
+    $('#p_base_url').value = p.base_url;
+    $('#p_temperature').value = p.temperature;
+    $('#p_api_key').value = '';
+    $('#form-head').textContent = `Edit "${p.name}"`;
+    pmsg('', true);
+    $('#p_name').focus();
+  });
+  document.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
+    if (!confirm(`Delete profile "${b.dataset.del}"?`)) return;
+    const res = await fetch('/api/llms/' + encodeURIComponent(b.dataset.del), {method: 'DELETE'});
+    if (!res.ok) { pmsg((await res.json()).detail || res.statusText, false); return; }
+    refreshProfiles(); loadProfiles().catch(() => {});
+  });
+}
+
+async function refreshProfiles() {
+  profiles = await (await fetch('/api/llms')).json();
+  renderProfiles();
+}
+
+function openLlmMgr() {
+  pmsg('', true);
+  refreshProfiles().catch(() =>
+    $('#plist').innerHTML = '<div class="empty">Failed to load profiles.</div>');
+  $('#llmmgr').hidden = false;
+}
+$('#llmbtn').onclick = openLlmMgr;
+$('#managelink').onclick = openLlmMgr;
+
+/* ---- workspace directory autocomplete ---- */
+let dirTimer = null;
+async function suggestDirs() {
+  const q = $('#workspace').value;
+  const dirs = await (await fetch('/api/dirs?q=' + encodeURIComponent(q))).json();
+  $('#wsdirs').innerHTML = dirs.map(d => `<option value="${esc(d)}">`).join('');
+}
+$('#workspace').addEventListener('input', () => {
+  clearTimeout(dirTimer);
+  dirTimer = setTimeout(() => suggestDirs().catch(() => {}), 150);
+});
+$('#workspace').addEventListener('focus', () => suggestDirs().catch(() => {}));
+
+$('#pform').onsubmit = async ev => {
+  ev.preventDefault();
+  const name = $('#p_name').value.trim();
+  const body = JSON.stringify({
+    name,
+    model: $('#p_model').value.trim(),
+    base_url: $('#p_base_url').value.trim(),
+    api_key: $('#p_api_key').value,
+    temperature: +$('#p_temperature').value,
+  });
+  const res = await fetch('/api/llms', {method: 'POST', headers: {'Content-Type': 'application/json'}, body});
+  if (!res.ok) { pmsg((await res.json()).detail || res.statusText, false); return; }
+  pmsg(`Saved "${name}"`, true);
+  $('#form-head').textContent = 'Add profile';
+  $('#pform').reset();
+  refreshProfiles(); loadProfiles().catch(() => {});
+};
+
+$('#createform').onsubmit = async ev => {
+  ev.preventDefault();
+  const stages = ROLES.filter(r => $('#st_' + r).checked);
+  if (!stages.length) { alert('Select at least one pipeline stage'); return; }
+  const body = JSON.stringify({
+    title: $('#title').value,
+    workspace: $('#workspace').value,
+    spec_path: $('#spec_path').value,
+    spec_text: $('#spec_text').value,
+    stages,
+    max_steps: +$('#max_steps').value,
+    docker: $('#docker').checked,
+    llm: $('#llm_profile').value,
+  });
+  const res = await fetch('/tasks', {method: 'POST', headers: {'Content-Type': 'application/json'}, body});
+  if (!res.ok) { alert((await res.json()).detail || res.statusText); return; }
+  $('#creator').hidden = true;
+  $('#title').value = ''; $('#workspace').value = '';
+  $('#spec_path').value = ''; $('#spec_text').value = '';
+};
+
+renderBoard();
+</script>
+</body>
+</html>

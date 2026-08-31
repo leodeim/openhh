@@ -1,0 +1,13 @@
+# holds LLM API keys in plaintext — never commit
+llms.json
+
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+# agent-generated demo workspaces
+demo-*/
+todoapp*/
+.qa/
+hello.txt
