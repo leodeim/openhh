@@ -113,6 +113,12 @@
     margin-top: .45rem; color: var(--dim); font-size: .75rem;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
+  .t-last.blocked { color: var(--bad); font-weight: 700; }
+  .tcard .force {
+    margin-top: .45rem; color: var(--warn);
+    border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+  }
+  .tcard .force:hover { color: var(--warn); border-color: var(--warn); }
 
   /* ---- modals ---- */
   .overlay {
@@ -342,7 +348,7 @@
           <input id="max_steps" type="number" value="12" min="1">
         </label>
       </div>
-      <label>pipeline stages <span class="hint" style="font-size:.72rem">(agents hand tasks to each other; the last enabled stage closes the task)</span>
+      <label>pipeline stages
         <div class="stagechecks">
           <label class="check"><input type="checkbox" id="st_architect"> Architect</label>
           <label class="check"><input type="checkbox" id="st_developer" checked> Developer</label>
@@ -350,23 +356,27 @@
         </div>
       </label>
       <div class="row">
+        <label title="tasks in one project run sequentially; projects run in parallel">project
+          <select id="project">
+            <option value="">— new (random codename) —</option>
+          </select>
+        </label>
         <label>workspace directory
           <input id="workspace" required list="wsdirs" autocomplete="off"
-                 placeholder="demo-temps, or ~/work for all repos">
+                 placeholder="~/work/my-project">
           <datalist id="wsdirs"></datalist>
         </label>
         <label>spec file path
           <input id="spec_path" placeholder="specs/example-temps.md">
         </label>
       </div>
-      <label>…or paste spec text (overrides spec file)
+      <label>…or paste spec text
         <textarea id="spec_text" placeholder="# Spec ..."></textarea>
       </label>
-      <label class="check toggle">
+      <label class="check toggle" title="needs Docker; the first run pulls the agent image">
         <input type="checkbox" id="docker" checked>
         <span class="track"><span class="knob"></span></span>
-        <span>run each agent in its own Docker container
-          <span class="hint">(needs Docker; first run pulls the image)</span></span>
+        <span>run each agent in its own Docker container</span>
       </label>
       <button id="create">Create task</button>
     </form>
@@ -432,6 +442,7 @@ function getTask(id) {
   if (!tasks.has(id)) {
     tasks.set(id, {
       id, title: `#${id}`, workspace: '', llm: '', model: '', max: '?',
+      project: '', color: '', blockedBy: null,
       stages: ['developer', 'qa'],
       status: 'todo', note: 'queued', active: null,
       step: 0, reworks: 0, reopens: 0,
@@ -461,6 +472,7 @@ function renderStatus() {
 /* ---- board ---- */
 function cardHTML(t) {
   const chips = [];
+  if (t.project) chips.push(`<span class="chip" style="color:${esc(t.color)};border-color:${esc(t.color)}">● ${esc(t.project)}</span>`);
   if (t.llm) chips.push(`<span class="chip">${esc(t.llm)}</span>`);
   chips.push(`<span class="chip">${t.stages.map(s => ROLE_NAMES[s][0]).join('·')}</span>`);
   if (t.step) chips.push(`<span class="chip">step ${t.step}/${t.max}</span>`);
@@ -471,12 +483,14 @@ function cardHTML(t) {
   if (t.status === 'done') chips.push(`<span class="chip verdict-ok">APPROVED</span>`);
   if (t.status === 'failed') chips.push(`<span class="chip verdict-bad">FAILED</span>`);
   const active = RUNNING.includes(t.status);
+  const blocked = t.status === 'todo' && t.blockedBy != null;
   const last = t.status === 'todo' ? t.note : `last: ${t.last}`;
   return `<article class="tcard ${t.status}${active ? ' active' : ''}" data-id="${t.id}">
     <div class="t-top"><span class="t-id">#${t.id}</span><span class="t-title">${esc(t.title)}</span></div>
     <div class="t-sub">${esc(t.workspace)}</div>
     ${chips.length ? `<div class="t-meta">${chips.join('')}</div>` : ''}
-    <div class="t-last">${esc(last)}</div>
+    <div class="t-last${blocked ? ' blocked' : ''}">${esc(last)}</div>
+    ${blocked ? `<button class="btn force" data-force="${t.id}">▶ run anyway</button>` : ''}
   </article>`;
 }
 
@@ -494,6 +508,11 @@ function renderBoard() {
   }).join('');
   document.querySelectorAll('.tcard').forEach(card =>
     card.addEventListener('click', () => openDetail(+card.dataset.id)));
+  document.querySelectorAll('[data-force]').forEach(b => b.onclick = async ev => {
+    ev.stopPropagation();
+    const res = await fetch(`/tasks/${b.dataset.force}/force`, {method: 'POST'});
+    if (!res.ok) alert((await res.json()).detail || res.statusText);
+  });
   renderStatus();
 }
 
@@ -518,7 +537,7 @@ function renderDetailHead(t) {
   const chip = $('#d-status');
   chip.className = `status-chip ${t.status}`;
   chip.textContent = labels[t.status];
-  $('#d-sub').textContent = [t.workspace, t.llm, t.model].filter(Boolean).join(' · ');
+  $('#d-sub').textContent = [t.project, t.workspace, t.llm, t.model].filter(Boolean).join(' · ');
   $('#reopenbar').hidden = !(t.status === 'done' || t.status === 'failed');
   document.querySelectorAll('.tab').forEach(b =>
     b.style.display = t.stages.includes(b.dataset.tab) ? '' : 'none');
@@ -599,14 +618,21 @@ function handle(e) {
     case 'task_created':
       Object.assign(t, {title: e.title, workspace: e.workspace, max: e.max_steps,
                         stages: e.stages || t.stages,
+                        project: e.project || '', color: e.color || '',
                         llm: e.llm || '', model: e.model, status: 'todo', note: 'queued'});
       break;
     case 'task_status':
+      t.blockedBy = null;
       if (e.status === 'starting') t.note = 'starting agents…';
+      if (e.status === 'forced') t.note = 'run anyway — queued';
+      break;
+    case 'task_blocked':
+      t.blockedBy = e.by;
+      t.note = `blocked by #${e.by} FAILED`;
       break;
     case 'task_reopened':
       Object.assign(t, {status: 'todo', note: 'reopened — queued', step: 0,
-                        active: null, reopens: t.reopens + 1});
+                        active: null, blockedBy: null, reopens: t.reopens + 1});
       pushLog(t, t.stages[0], {type: 'observation', role: t.stages[0],
                                title: 'reopened by user', text: e.comment});
       break;
@@ -661,8 +687,30 @@ document.addEventListener('keydown', ev => {
 });
 $('#newtask').onclick = () => {
   loadProfiles().catch(() => {});  // pick up edits made on the /llms page
+  loadProjects().catch(() => {});
   $('#creator').hidden = false; $('#title').focus();
 };
+
+/* ---- project selector: joining a project inherits its workspace ---- */
+let projects = [];
+
+async function loadProjects() {
+  const keep = $('#project').value;
+  projects = await (await fetch('/api/projects')).json();
+  $('#project').innerHTML = '<option value="">— new (random codename) —</option>' +
+    projects.map(p => `<option value="${esc(p.name)}">${esc(p.name)} — ${esc(p.workspace)}</option>`).join('');
+  if (projects.some(p => p.name === keep)) $('#project').value = keep;
+  syncProjectWorkspace();
+}
+
+function syncProjectWorkspace() {
+  const p = projects.find(x => x.name === $('#project').value);
+  const ws = $('#workspace');
+  ws.disabled = !!p;
+  ws.required = !p;
+  if (p) ws.value = p.workspace;
+}
+$('#project').addEventListener('change', syncProjectWorkspace);
 
 async function loadProfiles() {
   const keep = $('#llm_profile').value;
@@ -771,6 +819,7 @@ $('#createform').onsubmit = async ev => {
   const body = JSON.stringify({
     title: $('#title').value,
     workspace: $('#workspace').value,
+    project: $('#project').value,
     spec_path: $('#spec_path').value,
     spec_text: $('#spec_text').value,
     stages,
@@ -783,6 +832,8 @@ $('#createform').onsubmit = async ev => {
   $('#creator').hidden = true;
   $('#title').value = ''; $('#workspace').value = '';
   $('#spec_path').value = ''; $('#spec_text').value = '';
+  $('#project').value = '';
+  syncProjectWorkspace();
 };
 
 renderBoard();

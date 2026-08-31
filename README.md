@@ -44,16 +44,24 @@ stored in `llms.json`, which is gitignored because it holds API keys).
 
 ## Using the dashboard
 
-**+ New task** takes a title, workspace directory, spec (file path or pasted
-text), the stages to enable, and an LLM profile. The task's card then follows
-the agent handoffs across the board columns (To Do → Architect → In Dev → In
-QA → Done), moving backward on rework. Clicking a card shows each agent's
-live log and plan. A finished task can be **reopened** with a comment — a new
-run in the same workspace that receives your notes as rework instructions.
+**+ New task** takes a title, project, workspace directory, spec (file path
+or pasted text), the stages to enable, and an LLM profile. The task's card
+then follows the agent handoffs across the board columns (To Do → Architect →
+In Dev → In QA → Done), moving backward on rework. Clicking a card shows each
+agent's live log and plan. A finished task can be **reopened** with a
+comment — a rerun that receives your notes as rework instructions.
 
-Tasks run in parallel up to `--max-parallel` (default 2). The server binds to
-localhost by default; the UI has no auth and tasks execute code, so don't
-expose it beyond your machine.
+Every task belongs to a **project** — a workspace with a codename, a color,
+and a task queue. Select one to queue the task after that project's earlier
+tasks (the workspace is inherited from the project); leave it empty to start
+a fresh project with a random codename. Tasks in the same project run
+sequentially, different projects run in parallel up to `--max-parallel`
+(default 2). If a task fails, its project's queue holds: the next card shows
+what blocked it with a **run anyway** override, and reopening the failed task
+puts the repair at the front of the queue — the chain resumes when it passes.
+
+The server binds to localhost by default; the UI has no auth and tasks
+execute code, so don't expose it beyond your machine.
 
 ## Tuning
 

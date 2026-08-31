@@ -1,9 +1,13 @@
 """Web dashboard for the Developer/QA pipeline — a simplified kanban board.
 
 Each created task is one pipeline run: To Do -> In Dev -> In QA (looping back
-to In Dev on NEEDS_WORK) -> Done. Tasks run in parallel up to --max-parallel;
-the rest queue in To Do. Every event is tagged with its task_id and streamed
-over one SSE connection; refreshing the page replays the full board history.
+to In Dev on NEEDS_WORK) -> Done. Every task belongs to a project — a
+workspace with a codename, a color, and a task queue. Tasks in one project
+run sequentially (a failure holds the queue until the failed task is reopened
+and passes, or a queued task is forced with "run anyway"); different projects
+run in parallel up to --max-parallel. Every event is tagged with its task_id
+and streamed over one SSE connection; refreshing the page replays the full
+board history.
 
 Usage:
     uv run ui.py [--host 127.0.0.1] [--port 7799] [--max-parallel 2]
@@ -12,6 +16,7 @@ Usage:
 import argparse
 import itertools
 import json
+import random
 import threading
 from pathlib import Path
 
@@ -31,12 +36,21 @@ from pipeline import STAGE_ORDER, run_pipeline
 
 app = FastAPI(title="openhh")
 
-_lock = threading.Condition()
+# RLock: helpers that emit events are called both with and without _lock held
+_lock = threading.Condition(threading.RLock())
 _events: list[dict] = []
 _task_ids = itertools.count(1)
-_slots = threading.Semaphore(2)  # reassigned from --max-parallel in __main__
-_busy_workspaces: set[Path] = set()
-_tasks: dict[int, dict] = {}  # task_id -> run parameters + running flag, for reopen
+_max_parallel = 2  # reassigned from --max-parallel in __main__
+_running = 0
+_tasks: dict[int, dict] = {}     # task_id -> run parameters + scheduling state
+_projects: dict[str, dict] = {}  # name -> {color, workspace, queue, running, last_failed, failed_id}
+
+ADJECTIVES = ["brave", "calm", "eager", "fuzzy", "gentle", "jolly", "lucky",
+              "mellow", "nimble", "proud", "quiet", "swift", "witty", "zesty"]
+NOUNS = ["otter", "falcon", "badger", "lynx", "heron", "mole", "puffin",
+         "stoat", "wren", "yak", "ibex", "newt", "orca", "tapir"]
+PALETTE = ["#c19a58", "#6fada7", "#7396bd", "#a58bc9", "#85a883", "#c25b50",
+           "#58a6dc", "#b07aa1", "#8a9a5b", "#c78d6b"]
 
 MAX_TEXT = 4000
 
@@ -95,7 +109,8 @@ def _emit(item: dict) -> None:
 
 class TaskRequest(BaseModel):
     title: str = ""
-    workspace: str
+    workspace: str = ""  # ignored when project names an existing project
+    project: str = ""  # empty = derive from workspace (join exact match or create)
     spec_path: str = ""
     spec_text: str = ""
     stages: list[str] = ["developer", "qa"]
@@ -104,8 +119,45 @@ class TaskRequest(BaseModel):
     llm: str = "default"  # profile name from the LLM profiles modal
 
 
-def _run_task(task_id: int, req: TaskRequest, spec: str, llm_config: LLMConfig,
-              workspace: Path, feedback: str | None = None) -> None:
+def _new_project(workspace: Path) -> str:
+    """Create a project with a free random codename; call with _lock held."""
+    name = next((n for n in (f"{random.choice(ADJECTIVES)}-{random.choice(NOUNS)}"
+                             for _ in range(100)) if n not in _projects),
+                f"project-{len(_projects) + 1}")
+    _projects[name] = {"color": PALETTE[len(_projects) % len(PALETTE)],
+                       "workspace": workspace, "queue": [], "running": None,
+                       "last_failed": False, "failed_id": None}
+    return name
+
+
+def _schedule() -> None:
+    """Start every startable queued task; call with _lock held.
+
+    Per project the queue head runs only when nothing from that project is
+    running and the project's last run didn't fail (a reopen or "run anyway"
+    sets force to override); across projects, up to _max_parallel run at once.
+    """
+    global _running
+    for proj in _projects.values():
+        if _running >= _max_parallel:
+            return
+        if proj["running"] is not None or not proj["queue"]:
+            continue
+        head = proj["queue"][0]
+        if proj["last_failed"] and not _tasks[head]["force"]:
+            continue
+        proj["queue"].pop(0)
+        proj["running"] = head
+        proj["last_failed"] = False
+        _tasks[head]["state"] = "running"
+        _running += 1
+        threading.Thread(target=_run_task, args=(head,), daemon=True).start()
+
+
+def _run_task(task_id: int) -> None:
+    info = _tasks[task_id]
+    req: TaskRequest = info["req"]
+
     def on_event(item: dict) -> None:
         if item["type"] == "agent_event":
             for summary in _summarize(item["role"], item["event"]):
@@ -113,21 +165,31 @@ def _run_task(task_id: int, req: TaskRequest, spec: str, llm_config: LLMConfig,
         else:
             _emit({**item, "task_id": task_id})
 
-    with _slots:
-        _emit({"type": "task_status", "task_id": task_id, "status": "starting"})
-        try:
-            run_pipeline(workspace, spec, req.max_steps, on_event,
-                         stages=req.stages, docker=req.docker, llm_config=llm_config,
-                         feedback=feedback)
-        except Exception as exc:  # surfaced to the UI, not just the server log
-            _emit({"type": "error", "role": "pipeline", "task_id": task_id,
-                   "title": "pipeline crashed", "text": str(exc)})
-            _emit({"type": "done", "task_id": task_id, "approved": False, "rounds": 0})
-        finally:
-            with _lock:
-                _busy_workspaces.discard(workspace)
-                if task_id in _tasks:
-                    _tasks[task_id]["running"] = False
+    _emit({"type": "task_status", "task_id": task_id, "status": "starting"})
+    approved = False
+    try:
+        approved = run_pipeline(info["workspace"], info["spec"], req.max_steps, on_event,
+                                stages=req.stages, docker=req.docker,
+                                llm_config=info["llm_config"], feedback=info["feedback"])
+    except Exception as exc:  # surfaced to the UI, not just the server log
+        _emit({"type": "error", "role": "pipeline", "task_id": task_id,
+               "title": "pipeline crashed", "text": str(exc)})
+        _emit({"type": "done", "task_id": task_id, "approved": False, "rounds": 0})
+    finally:
+        global _running
+        with _lock:
+            _running -= 1
+            info["state"] = "done" if approved else "failed"
+            info["force"] = False
+            proj = _projects[info["project"]]
+            proj["running"] = None
+            proj["last_failed"] = not approved
+            proj["failed_id"] = None if approved else task_id
+            _schedule()
+            if (not approved and proj["queue"]
+                    and not _tasks[proj["queue"][0]]["force"]):
+                _emit({"type": "task_blocked", "task_id": proj["queue"][0],
+                       "by": task_id})
 
 
 class ProfileRequest(BaseModel):
@@ -218,12 +280,22 @@ def delete_llm(name: str):
     return {"ok": True}
 
 
-def _overlapping(workspace: Path) -> Path | None:
-    """A busy workspace that is the same as, inside, or containing this one."""
-    for busy in _busy_workspaces:
-        if workspace == busy or workspace.is_relative_to(busy) or busy.is_relative_to(workspace):
-            return busy
+def _overlapping(workspace: Path) -> tuple[str, Path] | None:
+    """A project whose workspace is the same as, inside, or containing this one."""
+    for name, proj in _projects.items():
+        other = proj["workspace"]
+        if workspace == other or workspace.is_relative_to(other) or other.is_relative_to(workspace):
+            return name, other
     return None
+
+
+@app.get("/api/projects")
+def list_projects():
+    with _lock:
+        return [{"name": name, "color": p["color"], "workspace": str(p["workspace"]),
+                 "queued": len(p["queue"]), "running": p["running"] is not None,
+                 "blocked": p["last_failed"]}
+                for name, p in _projects.items()]
 
 
 @app.post("/tasks")
@@ -246,25 +318,43 @@ def create_task(req: TaskRequest):
     if llm_config.model == PLACEHOLDER_MODEL:
         raise HTTPException(400, f"LLM profile '{req.llm}' is a placeholder — "
                                  "set a real model and base URL in LLM profiles first")
-    # nested workspaces count too: a task in ~/work and one in ~/work/repos/foo
-    # would trample each other's files just like an exact match
-    workspace = Path(req.workspace).expanduser().resolve()
     with _lock:
-        busy = _overlapping(workspace)
-        if busy:
-            raise HTTPException(409, f"A task is already running in {busy}, which overlaps {workspace}")
-        _busy_workspaces.add(workspace)
-    task_id = next(_task_ids)
-    title = req.title.strip() or f"{workspace.name} #{task_id}"
-    with _lock:
+        project = req.project.strip()
+        if project:
+            if project not in _projects:
+                raise HTTPException(400, f"Unknown project: {project}")
+            workspace = _projects[project]["workspace"]
+        else:
+            if not req.workspace.strip():
+                raise HTTPException(400, "Provide a workspace directory")
+            workspace = Path(req.workspace).expanduser().resolve()
+            exact = next((n for n, p in _projects.items() if p["workspace"] == workspace), None)
+            if exact:
+                project = exact  # same directory = same queue
+            else:
+                # nested workspaces clash too: a project in ~/work and one in
+                # ~/work/repos/foo would trample each other's files
+                clash = _overlapping(workspace)
+                if clash:
+                    raise HTTPException(409, f"Workspace overlaps project '{clash[0]}' "
+                                             f"({clash[1]}) — select that project instead")
+                project = _new_project(workspace)
+        proj = _projects[project]
+        task_id = next(_task_ids)
+        title = req.title.strip() or f"{workspace.name} #{task_id}"
         _tasks[task_id] = {"req": req, "spec": spec, "llm_config": llm_config,
-                           "workspace": workspace, "running": True}
-    _emit({"type": "task_created", "task_id": task_id, "title": title,
-           "workspace": req.workspace, "stages": req.stages, "max_steps": req.max_steps,
-           "llm": req.llm, "model": llm_config.model})
-    threading.Thread(target=_run_task, args=(task_id, req, spec, llm_config, workspace),
-                     daemon=True).start()
-    return {"ok": True, "task_id": task_id}
+                           "workspace": workspace, "project": project,
+                           "feedback": None, "force": False, "state": "queued"}
+        proj["queue"].append(task_id)
+        _emit({"type": "task_created", "task_id": task_id, "title": title,
+               "workspace": str(workspace), "stages": req.stages, "max_steps": req.max_steps,
+               "llm": req.llm, "model": llm_config.model,
+               "project": project, "color": proj["color"]})
+        _schedule()
+        if (_tasks[task_id]["state"] == "queued" and proj["last_failed"]
+                and proj["queue"] and proj["queue"][0] == task_id):
+            _emit({"type": "task_blocked", "task_id": task_id, "by": proj["failed_id"]})
+    return {"ok": True, "task_id": task_id, "project": project}
 
 
 class ReopenRequest(BaseModel):
@@ -273,8 +363,10 @@ class ReopenRequest(BaseModel):
 
 @app.post("/tasks/{task_id}/reopen")
 def reopen_task(task_id: int, req: ReopenRequest):
-    """Re-run a finished task in its workspace, seeding the pipeline with the
-    user's comment as rework notes (same spec, stages, and LLM profile)."""
+    """Re-queue a finished task, seeding the pipeline with the user's comment
+    as rework notes (same spec, stages, and LLM profile). The repair jumps to
+    the front of its project's queue and runs even after a failure — a green
+    rerun unblocks the tasks queued behind it."""
     comment = req.comment.strip()
     if not comment:
         raise HTTPException(400, "A comment is required — tell the agents what to fix")
@@ -283,19 +375,27 @@ def reopen_task(task_id: int, req: ReopenRequest):
         if info is None:
             raise HTTPException(404, f"No task #{task_id} (tasks live in server memory; "
                                      "a restarted server cannot reopen older tasks)")
-        if info["running"]:
-            raise HTTPException(409, f"Task #{task_id} is still running")
-        busy = _overlapping(info["workspace"])
-        if busy:
-            raise HTTPException(409, f"A task is already running in {busy}, "
-                                     f"which overlaps {info['workspace']}")
-        _busy_workspaces.add(info["workspace"])
-        info["running"] = True
-    _emit({"type": "task_reopened", "task_id": task_id, "comment": comment})
-    threading.Thread(target=_run_task,
-                     args=(task_id, info["req"], info["spec"], info["llm_config"],
-                           info["workspace"], comment),
-                     daemon=True).start()
+        if info["state"] in ("queued", "running"):
+            raise HTTPException(409, f"Task #{task_id} is still {info['state']}")
+        info.update(feedback=comment, force=True, state="queued")
+        _projects[info["project"]]["queue"].insert(0, task_id)
+        _emit({"type": "task_reopened", "task_id": task_id, "comment": comment})
+        _schedule()
+    return {"ok": True, "task_id": task_id}
+
+
+@app.post("/tasks/{task_id}/force")
+def force_task(task_id: int):
+    """Let a queued task run even though an earlier task in its project failed."""
+    with _lock:
+        info = _tasks.get(task_id)
+        if info is None:
+            raise HTTPException(404, f"No task #{task_id}")
+        if info["state"] != "queued":
+            raise HTTPException(409, f"Task #{task_id} is not queued (state: {info['state']})")
+        info["force"] = True
+        _emit({"type": "task_status", "task_id": task_id, "status": "forced"})
+        _schedule()
     return {"ok": True, "task_id": task_id}
 
 
@@ -334,7 +434,7 @@ if __name__ == "__main__":
     parser.add_argument("--max-parallel", type=int, default=2,
                         help="Concurrent pipeline runs; extra tasks queue in To Do")
     args = parser.parse_args()
-    _slots = threading.Semaphore(args.max_parallel)
+    _max_parallel = args.max_parallel
     # printed directly: imported libs hijack logging and can garble uvicorn's own line
     shown_host = "localhost" if args.host in ("0.0.0.0", "127.0.0.1") else args.host
     print(f"openhh: http://{shown_host}:{args.port}", flush=True)
